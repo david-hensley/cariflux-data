@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# Data files (data lives on HF, not in this repo)
+*.nc
+*.tif
+*.tif.gz
+
+# Editor
+.vscode/
+.idea/
+.DS_Store

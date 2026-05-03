@@ -1,0 +1,42 @@
+name: Build CHIRPS year
+
+# Manual trigger only for now. Once we've verified the small-taste
+# pipeline works end-to-end, we'll add a scheduled trigger for
+# monthly refreshes.
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Year to build (e.g. 2015)"
+        required: true
+        default: "2015"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # GitHub Actions runners get up to 6 hours per job and ~14 GB
+    # of disk by default, more than enough for one CHIRPS year.
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install xarray netCDF4 requests huggingface_hub
+
+      - name: Build year file
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          YEAR:     ${{ inputs.year }}
+        run: |
+          python scripts/build_chirps_year.py
