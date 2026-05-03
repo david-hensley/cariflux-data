@@ -52,39 +52,48 @@ CARIBBEAN_BBOX = dict(lon_min=-89.0, lon_max=-58.0,
                       lat_min=9.5,   lat_max=28.0)
 
 # CHIRTS-ERA5 URL pattern. The operational product lives under
-# /experimental/CHIRTS-ERA5/. Two variables per year.
-# Example file names follow the pattern:
-#   Tmax.YYYY.nc / Tmin.YYYY.nc (uppercase variable, by year)
+# /experimental/CHIRTS-ERA5/. Two variables: tmax and tmin.
+# Each variable has its own subdirectory, with daily NetCDFs
+# organized as one file per year:
+#   /experimental/CHIRTS-ERA5/<lower>/netcdf/daily/
+#       CHIRTS-ERA5.daily_<Title>.<YYYY>.nc
+#
+# Note the case mismatch: directories are lowercase (tmax, tmin),
+# but the filename uses Tmax/Tmin. Each year file is ~6.7 GiB
+# global float64; we crop to ~MB after Caribbean clip.
 CHIRTS_URL_TEMPLATE = (
     "https://data.chc.ucsb.edu/experimental/CHIRTS-ERA5/"
-    "global_netcdf_p05/{var}/{var}.{year}.nc"
+    "{var_dir}/netcdf/daily/CHIRTS-ERA5.daily_{var_file}.{year}.nc"
 )
 
 HF_REPO_ID = "cariflux/chirts-caribbean"
 
-# The two variables we mirror. Source-side capitalization is
-# Tmax/Tmin (matching the URL); we rename to lowercase tmax/tmin
-# in the output NetCDFs so the R-side variable names follow the
-# CARIFLUX convention.
+# The two variables we mirror. CHIRTS-ERA5's filesystem uses
+# lowercase directory names (tmax, tmin) but Title-case in
+# filenames (Tmax, Tmin). We track both. Output variable name
+# in our NetCDF is lowercase, matching CARIFLUX convention.
 VARIABLES = [
-    {"src_name": "Tmax", "out_name": "tmax",
+    {"var_dir": "tmax", "var_file": "Tmax", "out_name": "tmax",
      "longname": "CHIRTS-ERA5 daily maximum 2 m temperature"},
-    {"src_name": "Tmin", "out_name": "tmin",
+    {"var_dir": "tmin", "var_file": "Tmin", "out_name": "tmin",
      "longname": "CHIRTS-ERA5 daily minimum 2 m temperature"},
 ]
 
 
-def fetch_global_year(var: str, year: str, dest: Path) -> bool:
+def fetch_global_year(var_dir: str, var_file: str,
+                       year: str, dest: Path) -> bool:
     """Download the global CHIRTS-ERA5 year file for one variable.
     Returns True on success, False if the year doesn't exist
     remotely (e.g. asking for a future year)."""
-    url = CHIRTS_URL_TEMPLATE.format(var=var, year=year)
+    url = CHIRTS_URL_TEMPLATE.format(
+        var_dir=var_dir, var_file=var_file, year=year
+    )
     print(f"Fetching {url}")
     print(f"  -> {dest}")
 
     with requests.get(url, stream=True, timeout=600) as r:
         if r.status_code == 404:
-            print(f"  404 — {var} {year} not yet published. Skipping.")
+            print(f"  404 — {var_file} {year} not yet published. Skipping.")
             return False
         r.raise_for_status()
         total = int(r.headers.get("content-length", 0))
@@ -93,7 +102,7 @@ def fetch_global_year(var: str, year: str, dest: Path) -> bool:
             for chunk in r.iter_content(chunk_size=1024 * 1024):
                 f.write(chunk)
                 downloaded += len(chunk)
-                if total > 0 and downloaded % (100 * 1024 * 1024) < 1024 * 1024:
+                if total > 0 and downloaded % (200 * 1024 * 1024) < 1024 * 1024:
                     pct = 100 * downloaded / total
                     print(f"  {downloaded // (1024**2)} MB ({pct:.0f}%)")
 
@@ -213,23 +222,29 @@ def list_existing_year_files(token: str) -> set:
 def process_one_year_one_var(year: str, var_spec: dict,
                              token: str) -> bool:
     """Download, crop, upload one year's worth of one variable.
-    Returns True on success, False if the year wasn't available."""
-    var_src  = var_spec["src_name"]
+    Returns True on success, False if the year wasn't available.
+
+    The TemporaryDirectory context manager guarantees that the
+    big global file (~6.7 GiB for CHIRTS) is deleted before this
+    function returns, so disk usage stays bounded between calls.
+    """
+    var_dir  = var_spec["var_dir"]
+    var_file = var_spec["var_file"]
     var_out  = var_spec["out_name"]
     longname = var_spec["longname"]
 
     print(f"\n--- {var_out} {year} ---")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
-        global_file  = tmpdir / f"{var_src}.{year}.nc"
+        global_file  = tmpdir / f"CHIRTS-ERA5.daily_{var_file}.{year}.nc"
         cropped_file = tmpdir / f"{year}-{var_out}.nc"
 
-        ok = fetch_global_year(var_src, year, global_file)
+        ok = fetch_global_year(var_dir, var_file, year, global_file)
         if not ok:
             return False
 
         summary = crop_to_caribbean(global_file, cropped_file,
-                                     var_src, var_out, longname)
+                                     var_file, var_out, longname)
         print(f"Summary: {summary}")
 
         push_to_hf(cropped_file, f"{year}-{var_out}.nc", token)
