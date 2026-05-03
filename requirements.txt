@@ -2,3 +2,7 @@ xarray
 netCDF4
 requests
 huggingface_hub
+geopandas
+shapely
+rasterio
+numpy
