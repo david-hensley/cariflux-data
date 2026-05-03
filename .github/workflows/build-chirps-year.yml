@@ -1,23 +1,42 @@
-name: Build CHIRPS year
+name: Build CHIRPS year(s)
 
-# Manual trigger only for now. Once we've verified the small-taste
-# pipeline works end-to-end, we'll add a scheduled trigger for
-# monthly refreshes.
+# Manual trigger only for now. Once we've finalized the
+# bootstrap, we'll add a scheduled cron for monthly refreshes.
 on:
   workflow_dispatch:
     inputs:
-      year:
-        description: "Year to build (e.g. 2015)"
+      mode:
+        description: "Single year or range"
         required: true
+        type: choice
+        default: "single"
+        options:
+          - single
+          - range
+      year:
+        description: "Single mode: which year (e.g. 2015)"
+        required: false
         default: "2015"
+      year_start:
+        description: "Range mode: first year"
+        required: false
+        default: "1981"
+      year_end:
+        description: "Range mode: last year (inclusive)"
+        required: false
+        default: "2026"
+      skip_existing:
+        description: "Skip years already on Hugging Face"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
-    # GitHub Actions runners get up to 6 hours per job and ~14 GB
-    # of disk by default, more than enough for one CHIRPS year.
-    timeout-minutes: 60
+    # 6-hour cap. ~45 years × 4-5 min/year = comfortably under.
+    timeout-minutes: 350
 
     steps:
       - name: Check out repo
@@ -34,9 +53,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build year file
+      - name: Build year(s)
         env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          YEAR:     ${{ inputs.year }}
+          HF_TOKEN:      ${{ secrets.HF_TOKEN }}
+          YEAR:          ${{ inputs.mode == 'single' && inputs.year       || '' }}
+          YEAR_START:    ${{ inputs.mode == 'range'  && inputs.year_start || '' }}
+          YEAR_END:      ${{ inputs.mode == 'range'  && inputs.year_end   || '' }}
+          SKIP_EXISTING: ${{ inputs.skip_existing }}
         run: |
           python scripts/build_chirps_year.py
