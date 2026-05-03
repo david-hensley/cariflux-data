@@ -1,0 +1,45 @@
+name: Keepalive
+
+# Prevents GitHub from auto-disabling scheduled workflows after
+# 60 days of repo inactivity. Runs every 50 days, makes a trivial
+# timestamp commit, and pushes. The schedule cron itself counts
+# as "activity" and resets GitHub's clock.
+#
+# This is purely a machine-to-machine workflow — you should never
+# need to look at it.
+
+on:
+  workflow_dispatch:  # so you can trigger manually if needed
+  schedule:
+    - cron: "0 6 */50 * *"  # every ~50 days at 06:00 UTC
+
+# Need write access to push the timestamp commit
+permissions:
+  contents: write
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          # Need full history for git push to work cleanly
+          fetch-depth: 0
+
+      - name: Update timestamp file
+        run: |
+          mkdir -p .keepalive
+          date -u "+%Y-%m-%dT%H:%M:%SZ" > .keepalive/last_run.txt
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name  "cariflux-keepalive[bot]"
+          git config user.email "actions@users.noreply.github.com"
+          git add .keepalive/last_run.txt
+          if git diff --staged --quiet; then
+            echo "No changes; skipping commit."
+          else
+            git commit -m "chore(keepalive): refresh timestamp"
+            git push
+          fi

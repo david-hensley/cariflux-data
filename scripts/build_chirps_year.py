@@ -13,14 +13,21 @@ We do NOT apply a separate land mask. CHIRPS is a land-only
 product and already returns NaN over the deep ocean.
 
 Inputs (env vars):
-    HF_TOKEN        Hugging Face access token. Required.
-    YEAR            Single year to fetch (e.g. "2015").
-                    -- OR --
-    YEAR_START      First year of a range.
-    YEAR_END        Last year of a range (inclusive).
-    SKIP_EXISTING   "true" to skip years already on HF. Default
-                    "false" — overwrites by default for the
-                    current year (which gets refreshed monthly).
+    HF_TOKEN           Hugging Face access token. Required.
+
+    For manual runs:
+      MODE             "single" or "range" (matches the workflow
+                       UI input). Default "single".
+      YEAR             Single year to fetch (e.g. "2015").
+      YEAR_START       Range mode: first year.
+      YEAR_END         Range mode: last year (inclusive).
+      SKIP_EXISTING    "true" to skip years already on HF.
+
+    For scheduled runs (cron):
+      SCHEDULED_REFRESH "true" forces a single-year run for the
+                       current calendar year, with skip_existing
+                       disabled (overwrite). All other inputs
+                       are ignored.
 
 Output:
     Pushes one <YEAR>.nc per year to cariflux/chirps-caribbean.
@@ -172,25 +179,50 @@ def main() -> int:
         print("ERROR: HF_TOKEN env var is required.", file=sys.stderr)
         return 1
 
-    skip_existing = os.environ.get("SKIP_EXISTING", "false").lower() == "true"
+    # Scheduled refresh path: always rebuild the CURRENT year, since
+    # that's where new daily values accumulate as CHIRPS publishes
+    # them. Historical years (1981 through last calendar year) don't
+    # change, so we don't touch them on cron runs.
+    scheduled_refresh = (
+        os.environ.get("SCHEDULED_REFRESH", "false").lower() == "true"
+    )
 
-    # Resolve which years to process
-    single_year = os.environ.get("YEAR", "").strip()
-    year_start  = os.environ.get("YEAR_START", "").strip()
-    year_end    = os.environ.get("YEAR_END",   "").strip()
-
-    if single_year:
-        years = [single_year]
-    elif year_start and year_end:
-        years = [str(y) for y in range(int(year_start), int(year_end) + 1)]
+    if scheduled_refresh:
+        from datetime import datetime, timezone
+        current_year = str(datetime.now(timezone.utc).year)
+        print(f"=== Scheduled refresh of CHIRPS {current_year} ===")
+        print(f"Bbox: {CARIBBEAN_BBOX}")
+        years         = [current_year]
+        skip_existing = False  # force-overwrite the current year
     else:
-        print("ERROR: must set YEAR or both YEAR_START and YEAR_END.",
-              file=sys.stderr)
-        return 1
+        skip_existing = os.environ.get("SKIP_EXISTING", "false").lower() == "true"
 
-    print(f"=== Building CHIRPS years {years[0]}..{years[-1]} for Caribbean ===")
-    print(f"Bbox: {CARIBBEAN_BBOX}")
-    print(f"Skip existing: {skip_existing}")
+        # Resolve which years to process from manual-trigger inputs
+        single_year = os.environ.get("YEAR", "").strip()
+        year_start  = os.environ.get("YEAR_START", "").strip()
+        year_end    = os.environ.get("YEAR_END",   "").strip()
+        mode        = os.environ.get("MODE", "single").strip()
+
+        if mode == "single" and single_year:
+            years = [single_year]
+        elif mode == "range" and year_start and year_end:
+            years = [str(y) for y in range(int(year_start),
+                                           int(year_end) + 1)]
+        elif single_year:
+            # MODE not set; fall back to single_year if provided
+            years = [single_year]
+        elif year_start and year_end:
+            years = [str(y) for y in range(int(year_start),
+                                           int(year_end) + 1)]
+        else:
+            print("ERROR: must set YEAR or both YEAR_START and YEAR_END.",
+                  file=sys.stderr)
+            return 1
+
+        print(f"=== Building CHIRPS years {years[0]}..{years[-1]} "
+              "for Caribbean ===")
+        print(f"Bbox: {CARIBBEAN_BBOX}")
+        print(f"Skip existing: {skip_existing}")
 
     if skip_existing:
         existing = list_existing_years(token)

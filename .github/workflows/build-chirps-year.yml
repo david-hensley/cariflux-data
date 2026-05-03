@@ -1,7 +1,11 @@
 name: Build CHIRPS year(s)
 
-# Manual trigger only for now. Once we've finalized the
-# bootstrap, we'll add a scheduled cron for monthly refreshes.
+# Two trigger paths:
+#   1. Manual: run on demand with custom inputs (single year or
+#      range of years, with skip-existing knob).
+#   2. Scheduled: monthly refresh of the current year only, so
+#      newly-published CHIRPS days flow into the mirror without
+#      manual intervention.
 on:
   workflow_dispatch:
     inputs:
@@ -16,7 +20,7 @@ on:
       year:
         description: "Single mode: which year (e.g. 2015)"
         required: false
-        default: "2015"
+        default: "2026"
       year_start:
         description: "Range mode: first year"
         required: false
@@ -31,11 +35,18 @@ on:
         type: boolean
         default: true
 
+  schedule:
+    # 15th of every month at 12:00 UTC.
+    # CHIRPS finals publish with ~45-day lag from real time; running
+    # mid-month catches the most recent month that has been published.
+    - cron: "0 12 15 * *"
+
 jobs:
   build:
     runs-on: ubuntu-latest
 
     # 6-hour cap. ~45 years × 4-5 min/year = comfortably under.
+    # Scheduled runs only do current year, so much faster.
     timeout-minutes: 350
 
     steps:
@@ -55,10 +66,15 @@ jobs:
 
       - name: Build year(s)
         env:
-          HF_TOKEN:      ${{ secrets.HF_TOKEN }}
-          YEAR:          ${{ inputs.mode == 'single' && inputs.year       || '' }}
-          YEAR_START:    ${{ inputs.mode == 'range'  && inputs.year_start || '' }}
-          YEAR_END:      ${{ inputs.mode == 'range'  && inputs.year_end   || '' }}
-          SKIP_EXISTING: ${{ inputs.skip_existing }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # Manual runs read from `inputs`; scheduled runs use
+          # the current year via SCHEDULED_REFRESH=true.
+          # The script handles each branch internally.
+          MODE:              ${{ github.event_name == 'schedule' && 'scheduled' || inputs.mode }}
+          YEAR:              ${{ inputs.year }}
+          YEAR_START:        ${{ inputs.year_start }}
+          YEAR_END:          ${{ inputs.year_end }}
+          SKIP_EXISTING:     ${{ inputs.skip_existing }}
+          SCHEDULED_REFRESH: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
         run: |
           python scripts/build_chirps_year.py
