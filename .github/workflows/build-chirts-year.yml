@@ -1,0 +1,77 @@
+name: Build CHIRTS year(s)
+
+# Two trigger paths, mirroring the CHIRPS workflow:
+#   1. Manual: build a year or year-range of CHIRTS-ERA5 Tmax+Tmin
+#      with skip-existing support.
+#   2. Scheduled: monthly refresh of the current year only, so
+#      newly-published days flow into the mirror without manual
+#      intervention.
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Single year or range"
+        required: true
+        type: choice
+        default: "single"
+        options:
+          - single
+          - range
+      year:
+        description: "Single mode: which year (e.g. 2015)"
+        required: false
+        default: "2026"
+      year_start:
+        description: "Range mode: first year"
+        required: false
+        default: "1980"
+      year_end:
+        description: "Range mode: last year (inclusive)"
+        required: false
+        default: "2026"
+      skip_existing:
+        description: "Skip year/var pairs already on Hugging Face"
+        required: false
+        type: boolean
+        default: true
+
+  schedule:
+    # 15th of every month at 12:00 UTC. CHIRTS-ERA5 has a 5-day
+    # latency, so by mid-month the previous month's data is solid.
+    - cron: "0 12 15 * *"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    # 6-hour cap. ~46 years × 2 vars × ~30 sec/var = under 1 hour
+    # for a full historical bootstrap. Scheduled runs are much
+    # smaller (one year, two vars) and finish in 1-2 minutes.
+    timeout-minutes: 350
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build year(s)
+        env:
+          HF_TOKEN:          ${{ secrets.HF_TOKEN }}
+          MODE:              ${{ github.event_name == 'schedule' && 'scheduled' || inputs.mode }}
+          YEAR:              ${{ inputs.year }}
+          YEAR_START:        ${{ inputs.year_start }}
+          YEAR_END:          ${{ inputs.year_end }}
+          SKIP_EXISTING:     ${{ inputs.skip_existing }}
+          SCHEDULED_REFRESH: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+        run: |
+          python scripts/build_chirts_year.py
