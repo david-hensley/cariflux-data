@@ -11,6 +11,13 @@ venv/
 *.tif
 *.tif.gz
 
+# Local working directories for staging files before HF upload.
+# These should never be committed; the contents go to Hugging Face.
+input_soilgrids/
+input_landcover/
+input_chirps/
+input_chirts/
+
 # Editor
 .vscode/
 .idea/
