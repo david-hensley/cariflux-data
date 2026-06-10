@@ -121,8 +121,8 @@ SoilGrids is a multi-step manual rebuild because the upstream API
 is unreliable. The flow is:
 
 1. **Acquisition (manual web interface).** Open
-   https://maps.isric.org/ in a browser. For each of the 6
-   properties (`bdod`, `clay`, `silt`, `sand`, `soc`, `cfvo`)
+   https://maps.isric.org/ in a browser. For each of the 8
+   properties (`bdod`, `clay`, `silt`, `sand`, `soc`, `cfvo`, `cec`, `phh2o`)
    and each of the 6 depths (`0-5cm`, `5-15cm`, `15-30cm`,
    `30-60cm`, `60-100cm`, `100-200cm`), download two tiles
    covering the Caribbean as W/E halves:
@@ -135,7 +135,7 @@ is unreliable. The flow is:
    The 0.1° overlap zone around -74 longitude ensures the
    subsequent mosaic step produces a seamless result.
 
-   That's 72 downloads. Specify SoilGrids' native 250 m output
+   That's 96 downloads. Specify SoilGrids' native 250 m output
    resolution explicitly to keep each tile under the WCS
    16,384-pixel cap.
 
@@ -145,9 +145,9 @@ is unreliable. The flow is:
 
 2. **Mosaicking (R, in the cariflux repo).** Run
    `data-raw/mosaic_soilgrids_for_mirror.R` from the cariflux
-   R package's root. This reads the 72 input tiles, mosaics
+   R package's root. This reads the 96 input tiles, mosaics
    each W/E pair into a Caribbean-wide GeoTIFF, validates each
-   output's value range, and writes 36 COG-compressed
+   output's value range, and writes 48 COG-compressed
    `{property}_{depth}.tif` files to
    `data-raw/cache/soilgrids_caribbean_mirror/mosaicked/`.
 
@@ -159,7 +159,7 @@ is unreliable. The flow is:
    ```bash
    mkdir -p input_soilgrids  # local-only, in .gitignore
 
-   # Copy the 36 mosaicked .tif files into the staging dir
+   # Copy the 48 mosaicked .tif files into the staging dir
    cp /path/to/cariflux/data-raw/cache/soilgrids_caribbean_mirror/mosaicked/*.tif input_soilgrids/
 
    HF_TOKEN=... python scripts/build_soilgrids.py
