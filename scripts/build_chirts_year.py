@@ -80,31 +80,125 @@ VARIABLES = [
 ]
 
 
+# ---- Download robustness settings -------------------------------
+# CHC's server (data.chc.ucsb.edu) is unreliable for the large global
+# year files: connections stall mid-stream (silent socket) or drop
+# part-way (IncompleteRead). These settings make the download resilient:
+#   - a (connect, read) timeout so a stalled socket is killed after
+#     READ_TIMEOUT seconds of silence instead of hanging forever;
+#   - resume via HTTP Range requests so a mid-stream drop continues from
+#     where it stopped rather than restarting;
+#   - several attempts with linear backoff;
+#   - a final size check against the server's Content-Length so a
+#     truncated transfer is detected and retried, never passed on.
+CONNECT_TIMEOUT = 60          # seconds to establish the connection
+READ_TIMEOUT    = 120         # seconds of silence before giving up a read
+MAX_ATTEMPTS    = 5
+BACKOFF_SEC     = 20          # multiplied by attempt number
+
+
+def _remote_size(url: str):
+    """Return the server's Content-Length in bytes, or None if the
+    server doesn't report it. A HEAD request avoids downloading."""
+    try:
+        h = requests.head(url, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+                          allow_redirects=True)
+        if h.status_code == 200:
+            cl = h.headers.get("content-length")
+            return int(cl) if cl is not None else None
+    except requests.RequestException:
+        pass
+    return None
+
+
 def fetch_global_year(var_dir: str, var_file: str,
                        year: str, dest: Path) -> bool:
-    """Download the global CHIRTS-ERA5 year file for one variable.
-    Returns True on success, False if the year doesn't exist
-    remotely (e.g. asking for a future year)."""
+    """Download the global CHIRTS-ERA5 year file for one variable,
+    resumably and with retries. Returns True on success, False if the
+    year doesn't exist remotely (404, e.g. a future year). Raises on a
+    genuine, unrecoverable download failure so the caller records it as
+    a failure (not a silent skip)."""
     url = CHIRTS_URL_TEMPLATE.format(
         var_dir=var_dir, var_file=var_file, year=year
     )
     print(f"Fetching {url}")
     print(f"  -> {dest}")
 
-    with requests.get(url, stream=True, timeout=600) as r:
-        if r.status_code == 404:
-            print(f"  404 — {var_file} {year} not yet published. Skipping.")
-            return False
-        r.raise_for_status()
-        total = int(r.headers.get("content-length", 0))
-        downloaded = 0
-        with open(dest, "wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total > 0 and downloaded % (200 * 1024 * 1024) < 1024 * 1024:
-                    pct = 100 * downloaded / total
-                    print(f"  {downloaded // (1024**2)} MB ({pct:.0f}%)")
+    expected = _remote_size(url)
+    if expected is not None:
+        print(f"  server reports {expected // (1024**2)} MB")
+
+    last_err = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        have = dest.stat().st_size if dest.exists() else 0
+        # If we already have the whole file from a previous attempt, stop.
+        if expected is not None and have >= expected and have > 0:
+            break
+        headers = {}
+        mode = "wb"
+        if have > 0 and expected is not None:
+            # Resume: ask only for the remaining bytes, append to file.
+            headers["Range"] = f"bytes={have}-"
+            mode = "ab"
+            print(f"  attempt {attempt}: resuming at "
+                  f"{have // (1024**2)} MB")
+        else:
+            if have > 0:
+                # Can't resume safely without knowing total; restart.
+                dest.unlink(missing_ok=True)
+                have = 0
+            print(f"  attempt {attempt}: downloading")
+
+        try:
+            with requests.get(url, stream=True, headers=headers,
+                              timeout=(CONNECT_TIMEOUT, READ_TIMEOUT)) as r:
+                if r.status_code == 404:
+                    print(f"  404 — {var_file} {year} not yet "
+                          f"published. Skipping.")
+                    return False
+                # 416 = range not satisfiable: we already have it all.
+                if r.status_code == 416:
+                    break
+                r.raise_for_status()
+                if expected is None:
+                    cl = r.headers.get("content-length")
+                    if cl is not None:
+                        expected = int(cl) + have
+                downloaded = have
+                with open(dest, mode) as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if (expected and
+                                downloaded % (200 * 1024 * 1024)
+                                < 1024 * 1024):
+                            pct = 100 * downloaded / expected
+                            print(f"  {downloaded // (1024**2)} MB "
+                                  f"({pct:.0f}%)")
+            # Completed a pass without exception. Check completeness.
+            have = dest.stat().st_size
+            if expected is None or have >= expected:
+                last_err = None
+                break
+            last_err = (f"incomplete: have {have} of {expected} bytes")
+            print(f"  attempt {attempt} {last_err}")
+        except requests.RequestException as e:
+            last_err = f"{type(e).__name__}: {e}"
+            print(f"  attempt {attempt} failed: {last_err}")
+
+        if attempt < MAX_ATTEMPTS:
+            wait = BACKOFF_SEC * attempt
+            print(f"  waiting {wait}s before retry")
+            import time
+            time.sleep(wait)
+
+    if last_err is not None:
+        raise RuntimeError(
+            f"download of {var_file} {year} failed after "
+            f"{MAX_ATTEMPTS} attempts: {last_err}"
+        )
 
     size_mb = dest.stat().st_size / (1024 ** 2)
     print(f"Downloaded {size_mb:.1f} MB")
@@ -186,6 +280,60 @@ def crop_to_caribbean(in_file: Path, out_file: Path,
     }
 
 
+# Plausible physical range for Caribbean daily air temperature in
+# degrees Celsius. Used only to reject obviously-broken data (all-NA
+# stubs, wrong units, fill-value fields), not to filter real values.
+TEMP_MIN_PLAUSIBLE = -10.0
+TEMP_MAX_PLAUSIBLE = 55.0
+
+
+def validate_cropped(out_file: Path, out_var_name: str) -> None:
+    """Guard against uploading a hollow or corrupt file. CHC sometimes
+    serves a structurally-valid NetCDF whose data array is entirely
+    missing (this is how an all-NA stub reached the mirror before this
+    check existed). Raise if the cropped data has no finite values, or
+    if none of its finite values fall in a physically plausible range.
+
+    Only the sign of there being *some* real data is required -- we do
+    not reject individual out-of-range cells, only a file that is
+    entirely empty or entirely implausible.
+    """
+    ds = xr.open_dataset(out_file)
+    try:
+        if out_var_name not in ds.data_vars:
+            raise RuntimeError(
+                f"validation: variable {out_var_name} missing from "
+                f"{out_file.name}; vars present: {list(ds.data_vars)}"
+            )
+        arr = ds[out_var_name].values
+        finite = np.isfinite(arr)
+        n_finite = int(finite.sum())
+        if n_finite == 0:
+            raise RuntimeError(
+                f"validation: {out_file.name} has NO finite data values "
+                f"(all-NA/empty). Refusing to upload a hollow file -- "
+                f"the upstream source likely served a stub."
+            )
+        vals = arr[finite]
+        vmin = float(vals.min())
+        vmax = float(vals.max())
+        in_range = ((vals >= TEMP_MIN_PLAUSIBLE) &
+                    (vals <= TEMP_MAX_PLAUSIBLE))
+        frac_ok = float(in_range.mean())
+        print(f"  validation: {n_finite} finite values, "
+              f"range {vmin:.1f}..{vmax:.1f} C, "
+              f"{100*frac_ok:.0f}% in plausible range")
+        if frac_ok == 0.0:
+            raise RuntimeError(
+                f"validation: {out_file.name} has finite values but NONE "
+                f"in the plausible range [{TEMP_MIN_PLAUSIBLE}, "
+                f"{TEMP_MAX_PLAUSIBLE}] C (min {vmin:.1f}, max {vmax:.1f}). "
+                f"Refusing to upload likely-corrupt data."
+            )
+    finally:
+        ds.close()
+
+
 def push_to_hf(local_file: Path, remote_path: str, token: str) -> None:
     print(f"Uploading {local_file.name} -> hf://datasets/{HF_REPO_ID}/{remote_path}")
     api = HfApi(token=token)
@@ -246,6 +394,9 @@ def process_one_year_one_var(year: str, var_spec: dict,
         summary = crop_to_caribbean(global_file, cropped_file,
                                      var_file, var_out, longname)
         print(f"Summary: {summary}")
+
+        # Gate: never upload a hollow/corrupt file over good mirror data.
+        validate_cropped(cropped_file, var_out)
 
         push_to_hf(cropped_file, f"{year}-{var_out}.nc", token)
     return True
